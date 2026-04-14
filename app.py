@@ -1,229 +1,540 @@
-import pandas as pd
-import streamlit as st
+import re
 from pathlib import Path
 
-st.set_page_config(page_title="Cover Crop Decision Support Tool", page_icon="🌱", layout="wide")
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+
+st.set_page_config(
+    page_title="Cover Crop Decision Support Tool",
+    layout="wide",
+)
+
 
 DATA_CANDIDATES = [
-    Path("cover_crop_scoring_model_table.csv"),
-    Path("final_cover_crop_master_table.xlsx"),
-    Path("final_cover_crop_master_table.csv"),
+    "cover_crop_scoring_model_table.csv",
+    "final_cover_crop_master_table.csv",
+    "final_cover_crop_master_table.xlsx",
 ]
 
-BENEFIT_COLS = [
-    'Nitrogen fixation score',
-    'Erosion control score',
-    'Weed suppression score',
-    'Root depth score',
-    'Forage value score',
-    'Soil adaptability score'
+
+COLUMN_ALIASES = {
+    "crop_name": [
+        "Common name",
+        "Common Name",
+        "common_name",
+        "crop_name",
+        "Crop",
+    ],
+    "scientific_name": [
+        "Scientific name",
+        "Scientific Name",
+        "scientific_name",
+    ],
+    "season": [
+        "Season",
+        "season",
+        "Region of growth",
+        "Region of growth (cool/warm)",
+        "Region",
+    ],
+    "life_cycle": [
+        "Life cycle",
+        "Life Cycle",
+        "life_cycle",
+    ],
+    "functional_uses": [
+        "Functional uses",
+        "Functional use",
+        "Function",
+        "Uses",
+    ],
+    "warnings": [
+        "Warnings / negative effects",
+        "Warnings",
+        "Warnings/negative effects",
+        "Risk notes",
+    ],
+    "plant_structure": [
+        "Plant structure",
+        "Plant Structure",
+        "plant_structure",
+    ],
+    "root_type": [
+        "Root type",
+        "Root Type",
+        "root_type",
+    ],
+    "crude_protein": [
+        "Crude protein (%)",
+        "Crude Protein (%)",
+        "Crude protein",
+        "crude_protein",
+    ],
+    "prohibitive_soil": [
+        "Prohibitive soil",
+        "Prohibitive Soil",
+        "prohibitive_soil",
+    ],
+    "cn_ratio": [
+        "C:N ratio",
+        "CN_Ratio",
+        "C:N Ratio",
+        "cn_ratio",
+    ],
+    "nitrogen_fixation_score": [
+        "Nitrogen fixation score",
+        "nitrogen_fixation_score",
+        "nitrogen_fixation",
+        "Nitrogen Fixation Score",
+    ],
+    "erosion_control_score": [
+        "Erosion control score",
+        "erosion_control_score",
+        "erosion_control",
+        "Erosion Control Score",
+    ],
+    "weed_suppression_score": [
+        "Weed suppression score",
+        "weed_suppression_score",
+        "weed_suppression",
+        "Weed Suppression Score",
+    ],
+    "root_depth_score": [
+        "Root depth score",
+        "root_depth_score",
+        "root_depth",
+        "Root Depth Score",
+    ],
+    "forage_value_score": [
+        "Forage value score",
+        "forage_value_score",
+        "forage_value",
+        "Forage Value Score",
+    ],
+    "soil_adaptability_score": [
+        "Soil adaptability score",
+        "soil_adaptability_score",
+        "soil_adaptability",
+        "Soil Adaptability Score",
+    ],
+    "cost_level_score": [
+        "Cost level score",
+        "cost_level_score",
+        "cost_level",
+        "Cost Level Score",
+    ],
+    "risk_factor_score": [
+        "Risk factor score",
+        "risk_factor_score",
+        "risk_factor",
+        "Risk Factor Score",
+    ],
+}
+
+
+PRIORITY_FIELDS = [
+    "nitrogen_fixation_score",
+    "erosion_control_score",
+    "weed_suppression_score",
+    "root_depth_score",
+    "forage_value_score",
+    "soil_adaptability_score",
+    "cost_level_score",
+    "risk_factor_score",
 ]
-PENALTY_COLS = ['Cost level score', 'Risk factor score']
-ALL_SCORE_COLS = BENEFIT_COLS + PENALTY_COLS
-
-DEFAULT_WEIGHTS = {
-    'Nitrogen fixation score': 30,
-    'Erosion control score': 20,
-    'Weed suppression score': 20,
-    'Root depth score': 10,
-    'Forage value score': 5,
-    'Soil adaptability score': 5,
-    'Cost level score': 5,
-    'Risk factor score': 5,
-}
-
-FRIENDLY = {
-    'Nitrogen fixation score': 'Nitrogen fixation',
-    'Erosion control score': 'Erosion control',
-    'Weed suppression score': 'Weed suppression',
-    'Root depth score': 'Root depth',
-    'Forage value score': 'Forage value',
-    'Soil adaptability score': 'Soil adaptability',
-    'Cost level score': 'Low cost preference',
-    'Risk factor score': 'Low risk preference',
-}
 
 
-def load_data():
-    for path in DATA_CANDIDATES:
+def find_existing_column(df: pd.DataFrame, names: list[str]) -> str | None:
+    for name in names:
+        if name in df.columns:
+            return name
+    return None
+
+
+@st.cache_data
+def load_data() -> tuple[pd.DataFrame, str]:
+    for file_name in DATA_CANDIDATES:
+        path = Path(file_name)
         if path.exists():
-            if path.suffix.lower() == '.csv':
-                return pd.read_csv(path), path.name
-            return pd.read_excel(path)
-    return None, None
+            if path.suffix.lower() == ".csv":
+                df = pd.read_csv(path)
+            else:
+                df = pd.read_excel(path)
+            return df, file_name
+    raise FileNotFoundError(
+        "No data file found. Place one of these files in the same folder as app.py: "
+        + ", ".join(DATA_CANDIDATES)
+    )
 
 
-def derive_scores(df):
-    data = df.copy()
-    if 'Season' not in data.columns and 'Region of growth' in data.columns:
-        data['Season'] = data['Region of growth']
+def parse_first_numeric(value) -> float | None:
+    if pd.isna(value):
+        return None
+    text = str(value)
+    matches = re.findall(r"\d+(?:\.\d+)?", text)
+    if not matches:
+        return None
+    nums = [float(x) for x in matches]
+    return float(sum(nums) / len(nums))
 
-    if 'Common name' not in data.columns and 'CommonName' in data.columns:
-        data['Common name'] = data['CommonName']
-    if 'Scientific name' not in data.columns and 'ScientificName' in data.columns:
-        data['Scientific name'] = data['ScientificName']
-    if 'Functional uses' not in data.columns and 'Function' in data.columns:
-        data['Functional uses'] = data['Function']
-    if 'Warnings / negative effects' not in data.columns and 'Warnings' in data.columns:
-        data['Warnings / negative effects'] = data['Warnings']
 
-    text_cols = ['Functional uses', 'Warnings / negative effects', 'Root type', 'Prohibitive soil']
-    for c in text_cols:
-        if c not in data.columns:
-            data[c] = ''
-        data[c] = data[c].fillna('').astype(str)
+def standardize_base_columns(df: pd.DataFrame) -> pd.DataFrame:
+    renamed = {}
+    for standard_name, aliases in COLUMN_ALIASES.items():
+        existing = find_existing_column(df, aliases)
+        if existing:
+            renamed[existing] = standard_name
+    out = df.rename(columns=renamed).copy()
 
-    if 'Nitrogen fixation score' not in data.columns:
-        data['Nitrogen fixation score'] = data['Functional uses'].str.lower().apply(
-            lambda x: 5 if 'nitrogen' in x and 'fix' in x else 1
+    for col in [
+        "crop_name",
+        "scientific_name",
+        "season",
+        "life_cycle",
+        "functional_uses",
+        "warnings",
+        "plant_structure",
+        "root_type",
+        "crude_protein",
+        "prohibitive_soil",
+        "cn_ratio",
+    ]:
+        if col not in out.columns:
+            out[col] = ""
+
+    text_cols = [
+        "crop_name",
+        "scientific_name",
+        "season",
+        "life_cycle",
+        "functional_uses",
+        "warnings",
+        "plant_structure",
+        "root_type",
+        "crude_protein",
+        "prohibitive_soil",
+        "cn_ratio",
+    ]
+    for col in text_cols:
+        out[col] = out[col].fillna("").astype(str).str.strip()
+
+    out["season"] = out["season"].str.title()
+    out["life_cycle"] = out["life_cycle"].str.title()
+    return out
+
+
+def score_from_text(df: pd.DataFrame) -> pd.DataFrame:
+    uses = df["functional_uses"].str.lower()
+    warnings = df["warnings"].str.lower()
+    roots = df["root_type"].str.lower()
+    soils = df["prohibitive_soil"].str.lower()
+    protein = df["crude_protein"].apply(parse_first_numeric)
+    cn = df["cn_ratio"].apply(parse_first_numeric)
+
+    if "nitrogen_fixation_score" not in df.columns:
+        df["nitrogen_fixation_score"] = np.select(
+            [
+                uses.str.contains("nitrogen fix"),
+                uses.str.contains("legume|nitrogen scaveng"),
+            ],
+            [5, 3],
+            default=1,
         )
-    if 'Erosion control score' not in data.columns:
-        data['Erosion control score'] = data['Functional uses'].str.lower().apply(
-            lambda x: 5 if 'erosion' in x else (4 if 'soil' in x else 2)
-        )
-    if 'Weed suppression score' not in data.columns:
-        data['Weed suppression score'] = data['Functional uses'].str.lower().apply(
-            lambda x: 5 if 'weed' in x else 2
-        )
-    if 'Root depth score' not in data.columns:
-        def root_score(x):
-            x = x.lower()
-            if 'deep' in x and 'tap' in x:
-                return 5
-            if 'taproot' in x or 'tap root' in x:
-                return 4
-            if 'fibrous' in x:
-                return 3
-            return 2
-        data['Root depth score'] = data['Root type'].apply(root_score)
-    if 'Forage value score' not in data.columns:
-        data['Forage value score'] = data['Functional uses'].str.lower().apply(
-            lambda x: 4 if any(k in x for k in ['forage', 'graz', 'feed', 'livestock']) else 2
-        )
-    if 'Soil adaptability score' not in data.columns:
-        def soil_score(x):
-            x = x.lower()
-            restrictions = sum(k in x for k in ['saline', 'alkaline', 'acid', 'waterlog', 'flood', 'sodic', 'heavy'])
-            return max(1, 5 - restrictions)
-        data['Soil adaptability score'] = data['Prohibitive soil'].apply(soil_score)
-    if 'Cost level score' not in data.columns:
-        data['Cost level score'] = 3
-    if 'Risk factor score' not in data.columns:
-        def risk_score(x):
-            x = x.lower()
-            count = sum(k in x for k in ['toxic', 'bloat', 'invasive', 'disease', 'pest', 'difficult', 'injury'])
-            return min(5, max(1, count + 1))
-        data['Risk factor score'] = data['Warnings / negative effects'].apply(risk_score)
 
-    for c in ALL_SCORE_COLS:
-        data[c] = pd.to_numeric(data[c], errors='coerce').fillna(3).clip(1, 5)
-    return data
+    if "erosion_control_score" not in df.columns:
+        df["erosion_control_score"] = np.select(
+            [
+                uses.str.contains("erosion"),
+                uses.str.contains("soil builder|compaction|cover"),
+            ],
+            [5, 3],
+            default=2,
+        )
+
+    if "weed_suppression_score" not in df.columns:
+        df["weed_suppression_score"] = np.select(
+            [
+                uses.str.contains("weed suppress|weed control|control of annual weed"),
+                warnings.str.contains("weak weed competitor"),
+            ],
+            [5, 1],
+            default=2,
+        )
+
+    if "root_depth_score" not in df.columns:
+        df["root_depth_score"] = np.select(
+            [
+                roots.str.contains("deep|taproot|tap root|deep-rooting"),
+                roots.str.contains("fibrous|lateral"),
+            ],
+            [5, 3],
+            default=2,
+        )
+
+    if "forage_value_score" not in df.columns:
+        forage = np.select(
+            [
+                uses.str.contains("forage|feed|graz"),
+                protein.fillna(0) >= 20,
+                protein.fillna(0) >= 10,
+            ],
+            [5, 4, 3],
+            default=2,
+        )
+        df["forage_value_score"] = forage
+
+    if "soil_adaptability_score" not in df.columns:
+        soil_penalty = soils.str.count(";") + soils.replace("", np.nan).notna().astype(int)
+        adaptability = 5 - soil_penalty.clip(upper=4)
+        df["soil_adaptability_score"] = adaptability.fillna(3).clip(lower=1, upper=5)
+
+    if "cost_level_score" not in df.columns:
+        df["cost_level_score"] = np.select(
+            [
+                df["life_cycle"].str.contains("Perennial", case=False),
+                uses.str.contains("quick grower|easy|annual"),
+            ],
+            [2, 4],
+            default=3,
+        )
+
+    if "risk_factor_score" not in df.columns:
+        risk_hits = (
+            warnings.str.count("disease|susceptible|tox|bloat|invasive|difficult|poison|host")
+        )
+        risk = 5 - risk_hits.clip(upper=4)
+        risk = risk.where(warnings.ne(""), 4)
+        df["risk_factor_score"] = risk.clip(lower=1, upper=5)
+
+    for col in PRIORITY_FIELDS:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(3).clip(lower=1, upper=5)
+
+    df["_protein_value"] = protein
+    df["_cn_value"] = cn
+    return df
 
 
-def normalize_weights(weights):
+def compute_weighted_scores(df: pd.DataFrame, weights: dict[str, int]) -> tuple[pd.DataFrame, dict[str, float]]:
     total = sum(weights.values())
     if total == 0:
-        return {k: 1 / len(weights) for k in weights}
-    return {k: v / total for k, v in weights.items()}
+        normalized = {k: 0 for k in weights}
+    else:
+        normalized = {k: v / total for k, v in weights.items()}
+
+    result = df.copy()
+    result["cost_preference_score"] = 6 - result["cost_level_score"]
+    result["risk_preference_score"] = 6 - result["risk_factor_score"]
+
+    result["score"] = (
+        result["nitrogen_fixation_score"] * normalized["nitrogen_fixation_score"]
+        + result["erosion_control_score"] * normalized["erosion_control_score"]
+        + result["weed_suppression_score"] * normalized["weed_suppression_score"]
+        + result["root_depth_score"] * normalized["root_depth_score"]
+        + result["forage_value_score"] * normalized["forage_value_score"]
+        + result["soil_adaptability_score"] * normalized["soil_adaptability_score"]
+        + result["cost_preference_score"] * normalized["cost_level_score"]
+        + result["risk_preference_score"] * normalized["risk_factor_score"]
+    )
+
+    result = result.sort_values("score", ascending=False).reset_index(drop=True)
+    return result, normalized
 
 
-def apply_model(df, weights, season_choice, life_cycle_choice, top_n):
-    out = df.copy()
-    if season_choice != 'Any' and 'Season' in out.columns:
-        out = out[out['Season'].astype(str).str.lower() == season_choice.lower()]
-    if life_cycle_choice != 'Any' and 'Life cycle' in out.columns:
-        out = out[out['Life cycle'].astype(str).str.lower() == life_cycle_choice.lower()]
-
-    norm = normalize_weights(weights)
-    out['Recommendation score'] = 0.0
-    for col, wt in norm.items():
-        if col in BENEFIT_COLS:
-            out['Recommendation score'] += out[col] * wt
-        else:
-            out['Recommendation score'] += (6 - out[col]) * wt
-    out['Recommendation score'] = out['Recommendation score'].round(3)
-    out = out.sort_values('Recommendation score', ascending=False).reset_index(drop=True)
-    return out.head(top_n), norm
-
-
-def explain_row(row):
-    reasons = []
-    if row['Nitrogen fixation score'] >= 4:
-        reasons.append('strong nitrogen benefit')
-    if row['Erosion control score'] >= 4:
-        reasons.append('good erosion control')
-    if row['Weed suppression score'] >= 4:
-        reasons.append('good weed suppression')
-    if row['Root depth score'] >= 4:
-        reasons.append('strong root system')
-    if row['Soil adaptability score'] >= 4:
-        reasons.append('broader soil adaptability')
-    if row['Risk factor score'] <= 2:
-        reasons.append('lower warning risk')
-    return '; '.join(reasons) if reasons else 'balanced agronomic profile'
-
-
-df_raw, source_name = load_data()
-
-st.title('🌱 Cover Crop Decision Support Tool')
-st.write('This Streamlit prototype ranks cover crops using a weighted recommendation model based on user priorities such as nitrogen fixation, erosion control, weed suppression, cost, and risk.')
-
-if df_raw is None:
-    st.error('No input data file was found. Put cover_crop_scoring_model_table.csv or final_cover_crop_master_table.xlsx in the same folder as app.py.')
+try:
+    raw_df, loaded_file = load_data()
+except Exception as e:
+    st.error(str(e))
     st.stop()
 
-df = derive_scores(df_raw)
+df = standardize_base_columns(raw_df)
+df = score_from_text(df)
 
-with st.sidebar:
-    st.header('User inputs')
-    season_options = ['Any'] + sorted(df['Season'].dropna().astype(str).unique().tolist()) if 'Season' in df.columns else ['Any']
-    life_cycle_options = ['Any'] + sorted(df['Life cycle'].dropna().astype(str).unique().tolist()) if 'Life cycle' in df.columns else ['Any']
-    season_choice = st.selectbox('Preferred season/region', season_options, index=0)
-    life_cycle_choice = st.selectbox('Preferred life cycle', life_cycle_options, index=0)
-    top_n = st.slider('Number of recommendations', min_value=3, max_value=10, value=5)
-    st.markdown('### Priority weights')
-    weights = {}
-    for col in ALL_SCORE_COLS:
-        weights[col] = st.slider(FRIENDLY[col], min_value=0, max_value=50, value=DEFAULT_WEIGHTS[col], step=5)
+st.title("Cover Crop Decision Support Tool")
+st.markdown(
+    """
+This tool ranks cover crop options using a weighted recommendation model based on
+user-defined priorities such as nitrogen fixation, erosion control, weed suppression,
+root depth, forage value, soil adaptability, cost, and risk.
 
-results, norm_weights = apply_model(df, weights, season_choice, life_cycle_choice, top_n)
+Adjust the inputs in the sidebar to generate recommendations.
+"""
+)
 
-c1, c2 = st.columns([2, 1])
-with c1:
-    st.subheader('Top recommendations')
-    if results.empty:
-        st.warning('No crops matched the selected filters. Try choosing broader settings.')
-    else:
-        display_cols = [c for c in [
-            'Common name','Scientific name','Season','Life cycle','Recommendation score',
-            'Nitrogen fixation score','Erosion control score','Weed suppression score',
-            'Root depth score','Forage value score','Soil adaptability score',
-            'Cost level score','Risk factor score'
-        ] if c in results.columns]
-        st.dataframe(results[display_cols], use_container_width=True)
+st.sidebar.title("Input Parameters")
 
-with c2:
-    st.subheader('Normalized weights')
-    weight_df = pd.DataFrame({
-        'Trait': [FRIENDLY[k] for k in norm_weights.keys()],
-        'Weight': [round(v, 3) for v in norm_weights.values()]
-    }).sort_values('Weight', ascending=False)
-    st.dataframe(weight_df, use_container_width=True, hide_index=True)
+season_options = ["Any"] + sorted([x for x in df["season"].dropna().unique() if x])
+life_cycle_options = ["Any"] + sorted([x for x in df["life_cycle"].dropna().unique() if x])
 
-st.subheader('Recommendation details')
-if not results.empty:
-    for _, row in results.iterrows():
-        with st.expander(f"{row.get('Common name', 'Crop')} — score {row['Recommendation score']}"):
-            st.write(f"**Why recommended:** {explain_row(row)}")
-            left, right = st.columns(2)
-            with left:
-                for field in ['Scientific name', 'Season', 'Life cycle', 'Root type', 'Plant structure', 'Crude protein', 'C:N ratio']:
-                    if field in row.index:
-                        st.write(f"**{field}:** {row[field]}")
-            with right:
-                for field in ['Functional uses', 'Warnings / negative effects', 'Prohibitive soil']:
-                    if field in row.index:
-                        st.write(f"**{field}:** {row[field]}")
+selected_season = st.sidebar.selectbox("Season / Region", season_options)
+selected_life_cycle = st.sidebar.selectbox("Life Cycle", life_cycle_options)
+num_recommendations = st.sidebar.slider("Number of Recommendations", 1, 10, 3)
 
-st.subheader('Data source')
-st.caption(f"Loaded data file: {source_name}")
+st.sidebar.markdown("---")
+st.sidebar.subheader("Priority Weights")
+
+weights = {
+    "nitrogen_fixation_score": st.sidebar.slider(
+        "Nitrogen Fixation",
+        0,
+        50,
+        50,
+        help="Higher values prioritize crops with greater nitrogen fixation.",
+    ),
+    "erosion_control_score": st.sidebar.slider(
+        "Erosion Control",
+        0,
+        50,
+        50,
+        help="Higher values prioritize crops that protect soil from erosion.",
+    ),
+    "weed_suppression_score": st.sidebar.slider(
+        "Weed Suppression",
+        0,
+        50,
+        50,
+        help="Higher values prioritize crops with stronger weed suppression.",
+    ),
+    "root_depth_score": st.sidebar.slider(
+        "Root Depth",
+        0,
+        50,
+        20,
+        help="Higher values prioritize crops with deeper or stronger root systems.",
+    ),
+    "forage_value_score": st.sidebar.slider(
+        "Forage Value",
+        0,
+        50,
+        20,
+        help="Higher values prioritize crops useful for forage or feed.",
+    ),
+    "soil_adaptability_score": st.sidebar.slider(
+        "Soil Adaptability",
+        0,
+        50,
+        20,
+        help="Higher values prioritize crops with fewer soil restrictions.",
+    ),
+    "cost_level_score": st.sidebar.slider(
+        "Cost Importance",
+        0,
+        50,
+        0,
+        help="Higher values favor lower-cost crop options.",
+    ),
+    "risk_factor_score": st.sidebar.slider(
+        "Risk Avoidance",
+        0,
+        50,
+        40,
+        help="Higher values favor more reliable and lower-risk crop options.",
+    ),
+}
+
+filtered = df.copy()
+if selected_season != "Any":
+    filtered = filtered[filtered["season"].str.lower() == selected_season.lower()]
+if selected_life_cycle != "Any":
+    filtered = filtered[filtered["life_cycle"].str.lower() == selected_life_cycle.lower()]
+
+if filtered.empty:
+    st.warning("No crops match the selected filters. Please adjust the inputs.")
+    st.stop()
+
+results, normalized_weights = compute_weighted_scores(filtered, weights)
+top_results = results.head(num_recommendations).copy()
+
+col1, col2 = st.columns([1.8, 1])
+
+with col1:
+    st.subheader("Top Recommendations")
+    display_table = top_results[
+        [
+            "crop_name",
+            "scientific_name",
+            "season",
+            "life_cycle",
+            "score",
+        ]
+    ].rename(
+        columns={
+            "crop_name": "Common Name",
+            "scientific_name": "Scientific Name",
+            "season": "Season / Region",
+            "life_cycle": "Life Cycle",
+            "score": "Recommendation Score",
+        }
+    )
+    display_table["Recommendation Score"] = display_table["Recommendation Score"].round(2)
+    st.dataframe(display_table, use_container_width=True, hide_index=True)
+
+with col2:
+    st.subheader("Weight Distribution")
+    weights_df = pd.DataFrame(
+        {
+            "Priority": [
+                "Nitrogen fixation",
+                "Erosion control",
+                "Weed suppression",
+                "Root depth",
+                "Forage value",
+                "Soil adaptability",
+                "Cost importance",
+                "Risk avoidance",
+            ],
+            "Normalized Weight": list(normalized_weights.values()),
+        }
+    )
+    weights_df["Normalized Weight"] = weights_df["Normalized Weight"].round(2)
+    st.dataframe(weights_df, use_container_width=True, hide_index=True)
+
+st.subheader("Recommendation Details")
+for _, row in top_results.iterrows():
+    title = f"{row['crop_name']} — score {row['score']:.2f}"
+    with st.expander(title):
+        left, right = st.columns(2)
+        with left:
+            st.write(f"**Scientific name:** {row['scientific_name']}")
+            st.write(f"**Season / Region:** {row['season']}")
+            st.write(f"**Life cycle:** {row['life_cycle']}")
+            st.write(f"**Functional uses:** {row['functional_uses']}")
+            st.write(f"**Plant structure:** {row['plant_structure']}")
+            st.write(f"**Root type:** {row['root_type']}")
+        with right:
+            st.write(f"**Warnings:** {row['warnings']}")
+            st.write(f"**Crude protein:** {row['crude_protein']}")
+            st.write(f"**Prohibitive soil:** {row['prohibitive_soil']}")
+            st.write(f"**C:N ratio:** {row['cn_ratio']}")
+
+        st.markdown("**Scoring profile**")
+        score_profile = pd.DataFrame(
+            {
+                "Trait": [
+                    "Nitrogen fixation",
+                    "Erosion control",
+                    "Weed suppression",
+                    "Root depth",
+                    "Forage value",
+                    "Soil adaptability",
+                    "Cost preference score",
+                    "Risk preference score",
+                ],
+                "Value": [
+                    row["nitrogen_fixation_score"],
+                    row["erosion_control_score"],
+                    row["weed_suppression_score"],
+                    row["root_depth_score"],
+                    row["forage_value_score"],
+                    row["soil_adaptability_score"],
+                    6 - row["cost_level_score"],
+                    6 - row["risk_factor_score"],
+                ],
+            }
+        )
+        st.dataframe(score_profile, use_container_width=True, hide_index=True)
+
+st.markdown("---")
+st.caption(f"Loaded data file: {loaded_file}")
+st.caption("Developed as a decision support tool for cover crop selection using a weighted scoring model.")
